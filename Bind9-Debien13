@@ -1,0 +1,358 @@
+
+
+![[BIND9.png]]
+
+---
+
+![[Pasted image 20251107064811.png]]
+## **TiTre** : Installer et configurer BIND9 sur Debian 13 (Trixie)  
+
+**Description:**
+Guide pas-à-pas pour installer, configurer, sécuriser et dépanner BIND9 sur Debian 13. Contient exemples de fichiers de zone, vérifications, AppArmor, tests et bonnes pratiques.
+
+# Installer et configurer BIND9 sur Debian 13 (Trixie)
+
+> **But** : fournir un guide reproductible pour installer BIND9 (named) sur Debian 13, créer des zones forward & reverse, activer le logging de manière sûre (AppArmor), tester et dépanner.
+
+---
+
+## Table des matières
+
+- Prérequis
+- Installation des paquets
+- Structure des fichiers et emplacements
+- Exemple de configuration (named.conf.local, named.conf.options)
+- Exemples de fichiers de zone (forward & reverse)
+- Vérifications et tests
+- Logging et AppArmor (autoriser /var/log/bind)
+- Commandes utiles (named-checkconf, named-checkzone, rndc)
+- Sauvegarde, maintenance et bonnes pratiques
+- FAQ & résolution des erreurs courantes
+
+
+---
+
+## Prérequis
+
+- Un serveur Debian 13 (Trixie) à jour
+- Accès `sudo` ou root
+- Réseau configuré (IP statique recommandée)
+- Ports à ouvrir côté pare-feu : UDP 53, TCP 53 (et TCP 953 si RNDC distant)
+
+
+---
+
+## 1) Installation des paquets
+
+```bash
+sudo apt update
+sudo apt install -y bind9 bind9-utils bind9-doc dnsutils
+```
+
+- `bind9` : le serveur DNS `named`
+- `bind9utils` : utilitaires (`rndc`, `named-checkconf`, `named-checkzone`)
+- `dnsutils` : `dig`, `nslookup`, etc.
+
+---
+
+## 2) Structure des fichiers (emplacements importants)
+
+- `/etc/bind/named.conf` (point d'entrée)
+- `/etc/bind/named.conf.options` (options globales)
+- `/etc/bind/named.conf.local` (zones locales)
+- `/etc/bind/zones/` (répertoire recommandé pour tes fichiers de zone)
+- `/var/cache/bind/` (directory pour BIND)
+- `/var/log/bind/` (logs personnalisés si activés)
+
+
+> Crée un dossier `zones` si tu veux séparer tes fichiers :
+
+```bash
+sudo mkdir -p /etc/bind/zones
+sudo chown -R root:root /etc/bind/zones
+```
+
+---
+
+## 3) Configuration minimale : `named.conf.local`
+
+Édite `/etc/bind/named.conf.local` et ajoute tes zones :
+
+```conf
+// Zone directe pour atte-thm.cg
+zone "atte-thm.cg" {
+  type master;
+  file "/etc/bind/zones/db.atte-thm.cg";
+  allow-query { any; };
+};
+
+// Zone inverse pour 192.168.1.0/24
+zone "1.168.192.in-addr.arpa" {
+  type master;
+  file "/etc/bind/zones/db.192.168.1";
+  allow-query { any; };
+};
+```
+
+---
+
+## 4) Options globales : `named.conf.options`
+
+Exemple sécurisé et fonctionnel :
+
+```conf
+options {
+  directory "/var/cache/bind";
+
+  // écouter sur localhost et l'IP du serveur
+  listen-on { 127.0.0.1; 192.168.1.10; };
+  listen-on-v6 { none; };
+
+  // autoriser les réseaux internes
+  allow-query { localhost; 192.168.1.0/24; };
+  allow-recursion { localhost; 192.168.1.0/24; };
+
+  // forwarders pour résolution externe
+  forwarders { 1.1.1.1; 8.8.8.8; };
+
+  // sécurité
+  recursion yes;
+  allow-transfer { none; };
+  version "DNS Server";
+
+  dnssec-validation auto;
+  auth-nxdomain no;    // conforme à la RFC1035
+};
+  // logging (optionnel — nécessite AppArmor attention)
+  //logging { ... } à activer après avoir autorisé AppArmor
+  
+logging {
+   channel default_debug {
+       file "/var/log/bind/debug.log";
+       severity dynamic;
+   };
+};
+```
+
+---
+---
+
+## 5) Exemple de fichier de zone direct (forward) (`db.atte-thm.cg)
+
+Chemin : `/etc/bind/zones/db.atte-thm.cg
+
+```text
+$TTL 604800
+@       IN      SOA     ns1.atte-thm.cg. admin.atte-thm.cg. (
+                                2025110602 ; Serial
+                                604800     ; Refresh
+                                86400      ; Retry
+                                2419200    ; Expire
+                                604800 )   ; Negative Cache TTL
+
+; NS
+@       IN      NS      ns1.atte-thm.cg.
+
+; Enregistrements A
+@       IN      A       192.168.1.70
+ns1     IN      A       192.168.1.10
+www     IN      A       192.168.1.20
+ftp     IN      A       192.168.1.21
+mail    IN      A       192.168.1.25
+smtp    IN      A       192.168.1.25
+
+; Enregistrements CNAME
+serveur IN      CNAME   ns1
+portal  IN      CNAME   www
+
+; Enregistrements MX
+@       IN      MX      10 mail.atte-thm.cg.
+
+; Enregistrements TXT
+@       IN      TXT     "v=spf1 mx -all"
+_dmarc  IN      TXT     "v=DMARC1; p=quarantine; rua=mailto:admin@atte-thm.cg"
+```
+
+**Remarques** :
+
+- Toujours utiliser un **serial** modifié à chaque changement (format recommandé YYYYMMDDnn)
+- Serial YYYYMMDDnn --> Année-Mois-Date-Numéro (numéro pour mon cas, il le premier server bind qui fait autorité dans cette zones)
+- FQDN dans SOA/NS doit finir par un `.`
+    
+
+---
+
+## 6) Exemple de fichier de zone reverse (`db.192.168.1`)
+
+Chemin : `/etc/bind/zones/db.192.168.1`
+
+```text
+$TTL    604800
+@       IN      SOA     ns1.atte-thm.cg. admin.atte-thm.cg. (
+                              2025110602 ; Serial (→ +1)
+                              604800
+                              86400
+                              2419200
+                              604800 )
+
+; Serveur NS
+@       IN      NS      ns1.atte-thm.cg.
+70      IN      NS      ns1.atte-thm.cg.
+; PTR Records (noter les points à la fin)
+70      IN      PTR     atte-thm.cg.
+10      IN      PTR     ns1.atte-thm.cg.
+20      IN      PTR     www.atte-thm.cg.
+25      IN      PTR     mail.atte-thm.cg.
+```
+
+---
+
+## 7) Tester la configuration avant démarrage
+
+1. Vérifier la configuration globale :
+    
+
+```bash
+sudo named-checkconf
+```
+
+Aucune sortie signifie OK. S'il y a une erreur, la commande retourne un message explicite.
+
+2. Vérifier chaque zone :
+    
+
+```bash
+sudo named-checkzone atte-thm.cg /etc/bind/zones/db.atte-thm.cg
+sudo named-checkzone 1.168.192.in-addr.arpa /etc/bind/zones/db.192.168.1
+```
+
+![[Pasted image 20251107064637.png]]
+
+La sortie doit afficher `OK`.
+
+---
+
+## 8) Démarrer / redémarrer BIND
+
+```bash
+sudo systemctl enable --now named.service
+sudo systemctl status named.service
+```
+
+- Pour recharger les zones sans redémarrer :
+    
+
+```bash
+sudo rndc reload          # reload toutes les zones
+sudo rndc reload atte-thm.cg # reload d'une zone spécifique
+```
+
+---
+
+## 9) Logging et AppArmor (autoriser /var/log/bind)
+
+Si tu veux activer un logging personnalisé (ex : `/var/log/bind/debug.log`), AppArmor doit autoriser `named` à écrire dans ce dossier.
+
+Étapes :
+
+```bash
+sudo mkdir -p /var/log/bind
+sudo chown -R bind:bind /var/log/bind
+```
+
+Créer/éditer le fichier AppArmor local :
+
+```bash
+sudo nano /etc/apparmor.d/local/usr.sbin.named
+```
+
+Ajouter la ligne :
+
+```
+/var/log/bind/** rw,
+```
+
+Reloader le profil AppArmor :
+
+```bash
+sudo apparmor_parser -r /etc/apparmor.d/usr.sbin.named
+```
+
+Puis redémarrer named :
+
+```bash
+sudo systemctl restart named.service
+```
+
+Enfin, vérifier les logs :
+
+```bash
+sudo tail -f /var/log/bind/debug.log
+```
+
+---
+
+## 10) Commandes utiles (récapitulatif)
+
+```bash
+# vérifier config
+sudo named-checkconf
+
+# vérifier zone
+sudo named-checkzone <zone> <file>
+
+# status
+sudo systemctl status named.service
+
+# reload
+sudo rndc reload
+
+# vider cache
+sudo rndc flush
+
+# voir logs
+sudo journalctl -u named.service -f
+sudo tail -f /var/log/bind/debug.log
+```
+
+---
+
+## 11) Sauvegarde & maintenance
+
+- Sauvegarde régulière du dossier `/etc/bind/` (ex: git privé ou archive tar)
+
+```bash
+sudo tar czf /root/bind-backup-$(date +%F).tgz /etc/bind
+```
+
+- Avant toute modification : incrémenter le serial et effectuer `named-checkzone`
+- Tester dans un environnement isolé avant production
+
+
+---
+
+## 12) Erreurs courantes & résolutions rapides
+
+- **permission denied** pour logs → créer `/var/log/bind` et autoriser AppArmor (voir plus haut)
+- **zone not loaded due to errors** → utiliser `named-checkzone` pour localiser la ligne fautive
+- **missing trailing dot** pour FQDN → ajouter `.` final dans SOA/NS/PTR
+- **serial not incremented** → incrémenter dans SOA pour que les slaves reconnaissent le changement
+
+---
+
+## 13) Annexes (exemples pratiques)
+
+- Exemple `named.conf.options` + `named.conf.local` déjà fournis
+- Exemples `db.*` fournis
+
+---
+
+## 14) Licence & attribution
+
+Texte fourni sous licence permissive pour usage personnel et formation.
+
+---
+
+_Fin du document._
+
+
